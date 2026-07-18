@@ -24,6 +24,10 @@ function serverEnvDefine(mode: string) {
   );
 }
 
+/** Set by CI when building for https://kyun928.github.io/final-project/ */
+const isGitHubPages = process.env.GITHUB_PAGES === "true";
+const pagesBase = isGitHubPages ? "/final-project/" : "/";
+
 export default defineConfig(({ mode }) => ({
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
@@ -31,7 +35,15 @@ export default defineConfig(({ mode }) => ({
     server: { entry: "server" },
   },
   vite: {
+    base: pagesBase,
     // Lovable config only injects VITE_* — server-only secrets need explicit define.
-    define: serverEnvDefine(mode),
+    define: {
+      ...serverEnvDefine(mode),
+      ...(isGitHubPages
+        ? {
+            "import.meta.env.BASE_URL": JSON.stringify(pagesBase),
+          }
+        : {}),
+    },
   },
 }));
