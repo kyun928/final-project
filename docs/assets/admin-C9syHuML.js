@@ -1,0 +1,1 @@
+import{r as e}from"./useRouter-7EqUfoAg.js";import{f as t}from"./index-BhfUJR7G.js";var n=e();function r(){return(0,n.jsx)(t,{})}export{r as component};

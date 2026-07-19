@@ -1,30 +1,44 @@
 /**
  * Prepares a GitHub Pages–compatible static folder from a TanStack Start build.
  *
- * This app is SSR/Cloudflare-oriented, so `.output/public` has assets but no
- * index.html. For project Pages (https://user.github.io/repo/) we emit a SPA
- * shell that loads the client bundle and copies 404.html for client routing.
+ * GITHUB_PAGES builds use `nitro: false` + SPA mode → client assets in dist/client
+ * (and `_shell.html`). Cloudflare/Lovable builds keep Nitro → `.output/public`.
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 
 const root = process.cwd();
-const publicDir = resolve(root, ".output/public");
-const outDir = resolve(root, "gh-pages");
+const candidatePublicDirs = [
+  resolve(root, "dist/client"),
+  resolve(root, ".output/public"),
+];
+const publicDir = candidatePublicDirs.find((dir) => existsSync(dir));
+const outDir = resolve(process.env.GH_PAGES_OUT || join(root, "gh-pages"));
 const base = "/final-project/";
 
 function findClientEntry(assetsDir) {
   const files = readdirSync(assetsDir);
-  const preferred =
+  return (
     files.find((name) => /^index-.*\.js$/.test(name)) ||
     files.find((name) => /^entry-client.*\.js$/.test(name)) ||
-    files.find((name) => /client.*\.js$/.test(name) && !name.includes("server"));
-  return preferred ?? null;
+    null
+  );
 }
 
 function findMainCss(assetsDir) {
   const files = readdirSync(assetsDir);
-  return files.find((name) => /^styles-.*\.css$/.test(name)) ?? files.find((name) => name.endsWith(".css"));
+  return (
+    files.find((name) => /^styles-.*\.css$/.test(name)) ??
+    files.find((name) => name.endsWith(".css"))
+  );
 }
 
 function copyDir(src, dest) {
@@ -37,27 +51,60 @@ function copyDir(src, dest) {
   }
 }
 
-if (!existsSync(publicDir)) {
-  console.error("Missing .output/public — run `npm run build` first.");
+function clearDir(dir) {
+  if (!existsSync(dir)) return;
+  for (const entry of readdirSync(dir)) {
+    rmSync(join(dir, entry), { recursive: true, force: true });
+  }
+}
+
+if (!publicDir) {
+  console.error(
+    "Missing dist/client or .output/public — run `GITHUB_PAGES=true npm run build` first.",
+  );
   process.exit(1);
 }
 
 const assetsDir = join(publicDir, "assets");
 if (!existsSync(assetsDir)) {
-  console.error("Missing .output/public/assets");
+  console.error("Missing assets/ in", publicDir);
   process.exit(1);
 }
 
-const entryJs = findClientEntry(assetsDir);
-if (!entryJs) {
-  console.error("Could not find client entry JS in assets/");
-  process.exit(1);
+try {
+  rmSync(outDir, { recursive: true, force: true });
+} catch {
+  try {
+    clearDir(outDir);
+  } catch (error) {
+    console.warn("Could not fully clean output dir:", error.message);
+  }
 }
+mkdirSync(outDir, { recursive: true });
+copyDir(publicDir, outDir);
 
-const css = findMainCss(assetsDir);
-const cssTag = css ? `<link rel="stylesheet" href="${base}assets/${css}" />` : "";
+const shellCandidates = [
+  join(outDir, "_shell.html"),
+  join(outDir, "index.html"),
+  join(outDir, ".html"),
+];
+const shellSrc = shellCandidates.find((p) => existsSync(p));
+const indexPath = join(outDir, "index.html");
 
-const html = `<!doctype html>
+if (shellSrc && shellSrc !== indexPath) {
+  copyFileSync(shellSrc, indexPath);
+  console.log("Copied SPA shell → index.html from", shellSrc.replace(outDir, "."));
+} else if (!existsSync(indexPath)) {
+  const entryJs = findClientEntry(assetsDir);
+  if (!entryJs) {
+    console.error("No SPA shell and no client entry JS found.");
+    process.exit(1);
+  }
+  const css = findMainCss(assetsDir);
+  const cssTag = css
+    ? `<link rel="stylesheet" href="${base}assets/${css}" />`
+    : "";
+  const html = `<!doctype html>
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
@@ -72,24 +119,44 @@ const html = `<!doctype html>
   </head>
   <body>
     <div id="root"></div>
-    <script>
-      // Help client code detect GitHub Pages base path.
-      window.__GITHUB_PAGES_BASE__ = ${JSON.stringify(base)};
-    </script>
+    <script>window.__GITHUB_PAGES_BASE__ = ${JSON.stringify(base)};</script>
     <script type="module" crossorigin src="${base}assets/${entryJs}"></script>
   </body>
 </html>
 `;
+  writeFileSync(indexPath, html, "utf8");
+  console.log("Synthesized fallback index.html");
+}
 
-rmSync(outDir, { recursive: true, force: true });
-copyDir(publicDir, outDir);
-writeFileSync(join(outDir, "index.html"), html, "utf8");
-writeFileSync(join(outDir, "404.html"), html, "utf8");
+// Fix absolute asset paths if the shell was prerendered with a wrong base.
+let html = readFileSync(indexPath, "utf8");
+if (!html.includes(base) && html.includes('href="/assets/')) {
+  html = html
+    .replaceAll('href="/assets/', `href="${base}assets/`)
+    .replaceAll('src="/assets/', `src="${base}assets/`)
+    .replaceAll('href="/favicon', `href="${base}favicon`);
+  writeFileSync(indexPath, html, "utf8");
+  console.log("Rewrote asset URLs for project Pages base path");
+}
 
-// GitHub Pages: treat this as a project site, not a Jekyll site.
+copyFileSync(indexPath, join(outDir, "404.html"));
 writeFileSync(join(outDir, ".nojekyll"), "", "utf8");
 
-console.log("Prepared gh-pages/");
-console.log("  entry:", entryJs);
-if (css) console.log("  css:", css);
+// Clean junk from SPA path bugs / nitro leftovers
+for (const junk of [".html", "_headers"]) {
+  const junkPath = join(outDir, junk);
+  if (existsSync(junkPath)) {
+    try {
+      rmSync(junkPath, { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+const assetCount = readdirSync(join(outDir, "assets")).length;
+console.log("Prepared", outDir);
+console.log("  source:", publicDir);
+console.log("  assets:", assetCount);
 console.log("  base:", base);
+console.log("OUT_DIR=" + outDir);
